@@ -1,0 +1,124 @@
+import os
+from dotenv import load_dotenv
+import gradio as gr
+from openai import OpenAI
+import docx2txt
+import PyPDF2
+
+
+# Load OpenAI API key
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+
+
+# SJSU Color Scheme
+SJSU_BLUE = "#0055A2"
+SJSU_GOLD = "#FDB515"
+SJSU_LIGHT_BLUE = "#E0E8F5"
+
+
+# Custom CSS
+sjsu_css = f"""
+.gradio-container {{
+    background-color: {SJSU_LIGHT_BLUE};
+    font-family: Arial, sans-serif;
+}}
+.gradio-header {{
+    color: {SJSU_BLUE};
+    text-align: center;
+    font-size: 24px;
+    font-weight: bold;
+}}
+.gradio-button {{
+    background-color: {SJSU_GOLD} !important;
+    color: white !important;
+}}
+.gradio-button:hover {{
+    background-color: {SJSU_BLUE} !important;
+}}
+.user, .bot {{
+    background-color: {SJSU_BLUE};
+    color: white !important;
+    border-radius: 10px;
+    padding: 8px;
+    font-size: 16px;
+}}
+.bot {{
+    background-color: #004080 !important;
+}}
+"""
+
+
+def read_text_from_file(file_obj):
+    """Extract text from uploaded file."""
+    if not file_obj:
+        return ""
+    path = file_obj.name
+    try:
+        if path.endswith('.docx'):
+            return docx2txt.process(path)
+        elif path.endswith('.pdf'):
+            with open(path, 'rb') as f:
+                return ''.join(page.extract_text() or "" for page in PyPDF2.PdfReader(f).pages)
+        elif path.endswith('.txt'):
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        return "Unsupported file format. Please upload PDF, DOCX, or TXT."
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+
+def user_input(message, history):
+    return "", history + [{"role": "user", "content": message}]
+
+
+def generate_response(msg, history, files):
+    client = OpenAI(api_key=api_key)
+    prompt = [
+        {"role": "system", "content": "You are a helpful assistant. Answer questions based on the provided documents."}]
+
+    if files:
+        for f in files if isinstance(files, list) else [files]:
+            text = read_text_from_file(f)
+            if text.strip():
+                prompt.append({"role": "user", "content": f"Document content:\n{text}"})
+
+    prompt.extend(history)
+    prompt.append({"role": "user", "content": msg})
+
+    try:
+        response = client.chat.completions.create(model="gpt-3.5-turbo", messages=prompt, stream=True)
+        assistant_reply = {"role": "assistant", "content": ""}
+        history.append(assistant_reply)
+
+        for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                assistant_reply["content"] += delta
+                yield history
+    except Exception as e:
+        yield history + [{"role": "assistant", "content": f"Error: {e}"}]
+
+
+with gr.Blocks(css=sjsu_css, title="SJSU Document Assistant") as demo:
+    gr.Markdown(f"""
+    <div style='text-align:center; background:{SJSU_BLUE}; padding:20px; border-radius:10px; margin-bottom:20px;'>
+        <h1 style='color:{SJSU_GOLD}; margin:0;'>SJSU Document Assistant</h1>
+        <p style='color:white;'>Ask questions about your uploaded documents</p>
+    </div>
+    """)
+
+    chatbot = gr.Chatbot(label="Chat with your documents", type="messages")
+    msg_box = gr.Textbox(placeholder="Type your question here...", label="Your question")
+    upload_btn = gr.File(file_count="multiple", label="Upload documents (PDF, DOCX, TXT)",
+                         file_types=[".pdf", ".docx", ".txt"])
+    clear_btn = gr.Button("Clear Conversation", variant="primary")
+
+    msg_box.submit(user_input, [msg_box, chatbot], [msg_box, chatbot], queue=False).then(
+        generate_response, [msg_box, chatbot, upload_btn], chatbot
+    )
+    clear_btn.click(lambda: None, None, chatbot, queue=False)
+
+
+demo.queue()
+demo.launch()
