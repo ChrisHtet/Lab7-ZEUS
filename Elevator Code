@@ -1,0 +1,110 @@
+from pynq import Overlay, GPIO
+import time
+
+overlay = Overlay("./ps_gpio_kv260.bit")
+
+# --- Pin assignments ---
+# Inputs: 2-bit floor request and emergency button
+floor_req_A   = GPIO(GPIO.get_gpio_pin(0), 'in')  # Floor request bit A (MSB)
+floor_req_B   = GPIO(GPIO.get_gpio_pin(1), 'in')  # Floor request bit B (LSB)
+emergency_pin = GPIO(GPIO.get_gpio_pin(2), 'in')  # Emergency override
+
+# Outputs: LED indicators
+led_dir       = GPIO(GPIO.get_gpio_pin(3), 'out')  # 1=Up, 0=Down
+led_move      = GPIO(GPIO.get_gpio_pin(4), 'out')  # Blink during movement
+led_door      = GPIO(GPIO.get_gpio_pin(5), 'out')  # 1=Door open, 0=Door closed
+floor_led_A   = GPIO(GPIO.get_gpio_pin(6), 'out')  # Current floor bit A (MSB)
+floor_led_B   = GPIO(GPIO.get_gpio_pin(7), 'out')  # Current floor bit B (LSB)
+
+# --- Parameters ---
+FLOORS = 4
+current_floor = 0            # 0..3
+requests = [False] * FLOORS  # pending floor requests
+
+# Movement timing
+TOTAL_TIME = 3.0             # seconds per floor
+ACCEL = 0.8                  # accel phase
+DECEL = 0.8                  # decel phase
+SLOW_STEP = 0.1
+FAST_STEP = 0.02
+
+# --- Helpers ---
+def update_floor_leds(floor):
+    floor_led_A.write((floor >> 1) & 1)
+    floor_led_B.write(floor & 1)
+
+
+def read_floor_request():
+    code = (floor_req_A.read() << 1) | floor_req_B.read()
+    if 0 <= code < FLOORS:
+        return code
+    return None
+
+
+def move_to(target):
+    global current_floor
+    direction = 1 if target > current_floor else -1
+    steps = abs(target - current_floor)
+
+    for step in range(steps):
+        # start movement
+        led_dir.write(1 if direction > 0 else 0)
+        start = time.time()
+        updated = False
+        while time.time() - start < TOTAL_TIME:
+            elapsed = time.time() - start
+            # halfway update
+            if not updated and elapsed > 2.0:
+                update_floor_leds(current_floor + direction * (step + 1))
+                updated = True
+            # speed profile
+            if elapsed < ACCEL or elapsed > (TOTAL_TIME - DECEL):
+                time.sleep(SLOW_STEP)
+            else:
+                time.sleep(FAST_STEP)
+            # blink indicator
+            led_move.write(1)
+            time.sleep(0)
+            led_move.write(0)
+        # stop movement
+        led_move.write(0)
+    current_floor = target
+    update_floor_leds(current_floor)
+
+
+def open_door():
+    led_door.write(1)
+    time.sleep(1.0)
+    led_door.write(0)
+
+# --- Initialization ---
+update_floor_leds(current_floor)
+led_dir.write(0)
+led_move.write(0)
+led_door.write(0)
+
+# --- Main loop ---
+while True:
+    # Emergency overrides all
+    if emergency_pin.read():
+        requests = [False] * FLOORS
+        if current_floor != 0:
+            move_to(0)
+        open_door()
+        time.sleep(0.1)
+        continue
+
+    # Read floor request input
+    req = read_floor_request()
+    if req is not None:
+        requests[req] = True
+
+    # Service requests
+    if any(requests):
+        # simple queue: service lowest-numbered first
+        target = requests.index(True)
+        requests[target] = False
+        move_to(target)
+        open_door()
+    else:
+        time.sleep(0.1)  # idle
